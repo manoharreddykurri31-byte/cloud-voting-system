@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Cloud Voting System — Prototype</title>
+  <style>
+    body { font-family: Arial, sans-serif; text-align:center; padding:30px; background:#f5f7fb; }
+    .card { display:inline-block; background:white; padding:24px; border-radius:10px; box-shadow:0 6px 18px rgba(0,0,0,0.08); }
+    button { padding:10px 18px; margin:8px; font-size:16px; cursor:pointer; border-radius:6px; border:none; }
+    #loginBtn { background:#4285f4; color:#fff; }
+    #logoutBtn { background:#d9534f; color:#fff; }
+    .voteBtn { background:#28a745; color:#fff; }
+    #status { margin-top:12px; color:#333; }
+    #userInfo { margin-top:12px; font-size:14px; color:#555; }
+    #counts { margin-top:18px; font-weight:600; }
+  </style>
+</head>
+<body>
+  <h1>Cloud Voting System (Prototype)</h1>
+
+  <div class="card" id="mainCard">
+    <div id="authArea">
+      <button id="loginBtn">Login with Google</button>
+    </div>
+
+    <div id="votingArea" style="display:none;">
+      <div id="userInfo"></div>
+
+      <h3>Choose an option</h3>
+      <div>
+        <button class="voteBtn" id="optA">Vote Option A</button>
+        <button class="voteBtn" id="optB">Vote Option B</button>
+      </div>
+
+      <div id="counts">Loading counts...</div>
+      <div id="status"></div>
+      <div style="margin-top:10px;">
+        <button id="logoutBtn" style="display:none;">Logout</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    // ========= Firebase SDK imports (modular) =========
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-app.js";
+    import { getAuth, signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-auth.js";
+    import {
+      getFirestore, doc, getDoc, setDoc, onSnapshot, runTransaction, Timestamp
+    } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-firestore.js";
+
+    // ====== <<< YOUR FIREBASE CONFIG (from your project) >>> ======
+    const firebaseConfig = {
+      apiKey: "AIzaSyDu3KamMYEhCzJprWks-OiU0iuuhoCdN4g",
+      authDomain: "cloud-voting-system-db7c7.firebaseapp.com",
+      projectId: "cloud-voting-system-db7c7",
+      storageBucket: "cloud-voting-system-db7c7.firebasestorage.app",
+      messagingSenderId: "1019126121122",
+      appId: "1:1019126121122:web:41492eeec75514b922cdfb",
+      measurementId: "G-2WK4JP7KZG"
+    };
+    // ===============================================================
+
+    // Initialize
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+    const provider = new GoogleAuthProvider();
+
+    // Elements
+    const loginBtn = document.getElementById('loginBtn');
+    const logoutBtn = document.getElementById('logoutBtn');
+    const votingArea = document.getElementById('votingArea');
+    const authArea = document.getElementById('authArea');
+    const userInfoDiv = document.getElementById('userInfo');
+    const statusDiv = document.getElementById('status');
+    const countsDiv = document.getElementById('counts');
+    const optA = document.getElementById('optA');
+    const optB = document.getElementById('optB');
+
+    let currentUser = null;
+
+    // Open popup on click
+    loginBtn.addEventListener('click', () => {
+      statusDiv.innerText = 'Opening Google sign-in...';
+      
+      // We create a new provider instance to add a custom parameter
+      const accountChooserProvider = new GoogleAuthProvider();
+      accountChooserProvider.setCustomParameters({
+          prompt: 'select_account'
+      });
+
+      signInWithPopup(auth, accountChooserProvider)
+        .then((res) => {
+          // sign-in handled by onAuthStateChanged below
+          statusDiv.innerText = '';
+        })
+        .catch((err) => {
+          console.error('Sign-in error:', err);
+          statusDiv.innerText = 'Sign-in failed: ' + (err.message || err.code);
+        });
+    });
+
+    logoutBtn.addEventListener('click', () => {
+      signOut(auth).then(() => { location.reload(); });
+    });
+
+    // Listen auth state
+    onAuthStateChanged(auth, (user) => {
+      if (user) {
+        currentUser = user;
+        showVotingUI(user);
+      } else {
+        currentUser = null;
+        showLoginUI();
+      }
+    });
+
+    function showLoginUI(){
+      authArea.style.display = 'block';
+      votingArea.style.display = 'none';
+      statusDiv.innerText = 'Please login to vote.';
+    }
+
+    function showVotingUI(user){
+      authArea.style.display = 'none';
+      votingArea.style.display = 'block';
+      logoutBtn.style.display = 'inline-block';
+      userInfoDiv.innerHTML = `Signed in as <strong>${user.displayName || user.email}</strong>`;
+      statusDiv.innerText = 'You are signed in. If you already voted, you cannot vote again.';
+      startCountsListener();
+    }
+
+    async function submitVote(optionLabel) {
+  if (!currentUser) {
+    statusDiv.innerText = 'You must sign in first.';
+    return;
+  }
+  const uid = currentUser.uid;
+  const userVoteDocRef = doc(db, 'votes', uid);
+  const countDocRef = doc(db, 'voteCounts', optionLabel);
+
+  try {
+    await runTransaction(db, async (transaction) => {
+      // Step 1: Read the user's vote document
+      const userVoteDoc = await transaction.get(userVoteDocRef);
+
+      // Step 2: Check if the user has already voted
+      if (userVoteDoc.exists()) {
+        statusDiv.innerText = 'You have already voted. Thanks!';
+        throw 'User already voted';
+      }
+
+      // Step 3: If they haven't voted, read the current count
+      const countDoc = await transaction.get(countDocRef);
+      const newCount = (countDoc.exists() ? countDoc.data().count : 0) + 1;
+
+      // Step 4: Perform the writes
+      // Set the user's vote document
+      transaction.set(userVoteDocRef, {
+        choice: optionLabel,
+        uid: uid,
+        userEmail: currentUser.email || null,
+        timestamp: Timestamp.now(),
+      });
+      // Update the vote count
+      transaction.set(countDocRef, { count: newCount });
+    });
+
+    statusDiv.innerText = '✅ Your vote was recorded. Thank you!';
+  } catch (err) {
+    if (err === 'User already voted') {
+      return;
+    }
+
+    console.error('Vote error:', err);
+    statusDiv.innerText = 'Error recording vote: ' + (err.message || err.code);
+  }
+}
+    // Wire vote buttons
+    optA.addEventListener('click', () => submitVote('OptionA'));
+    optB.addEventListener('click', () => submitVote('OptionB'));
+
+    // Live counts listener
+    let unsubA = null, unsubB = null;
+    function startCountsListener(){
+      const aRef = doc(db, 'voteCounts', 'OptionA');
+      const bRef = doc(db, 'voteCounts', 'OptionB');
+
+      // unsubscribe old listeners if any
+      if (unsubA) unsubA();
+      if (unsubB) unsubB();
+
+      unsubA = onSnapshot(aRef, (snap) => {
+        const c = snap.exists() ? (snap.data().count || 0) : 0;
+        updateCounts(c, null);
+      }, (err) => console.error('counts A err', err));
+
+      unsubB = onSnapshot(bRef, (snap) => {
+        const c = snap.exists() ? (snap.data().count || 0) : 0;
+        updateCounts(null, c);
+      }, (err) => console.error('counts B err', err));
+    }
+
+    // small in-memory store to combine the two onSnapshot callbacks
+    let latestA = 0, latestB = 0;
+    function updateCounts(a, b){
+      if (a !== null) latestA = a;
+      if (b !== null) latestB = b;
+      countsDiv.innerText = `Option A: ${latestA}   |   Option B: ${latestB}`;
+    }
+
+    // If user not signed in and page open, still show counts (optional)
+    // Start a listener even before sign-in so counts visible to anyone:
+    (function startCountsForAll(){
+      const aRef = doc(db, 'voteCounts', 'OptionA');
+      const bRef = doc(db, 'voteCounts', 'OptionB');
+      onSnapshot(aRef, (snap) => { latestA = snap.exists()? (snap.data().count||0) : 0; updateCounts(); });
+      onSnapshot(bRef, (snap) => { latestB = snap.exists()? (snap.data().count||0) : 0; updateCounts(); });
+    })();
+
+  </script>
+</body>
+</html>
